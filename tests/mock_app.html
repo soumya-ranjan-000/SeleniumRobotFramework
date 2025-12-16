@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Self-Healing Test Page</title>
+    <style>
+        body { font-family: sans-serif; padding: 50px; }
+        .container { border: 1px solid #ccc; padding: 20px; border-radius: 8px; }
+        button { padding: 10px 20px; cursor: pointer; background-color: #007bff; color: white; border: none; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Healenium + GenApi Demo</h1>
+        <p>This button will change its ID in <span id="timer">5</span> seconds.</p>
+        
+        <!-- Initial ID is 'submit-btn' -->
+        <button id="submit-btn" onclick="alert('Clicked!')">Submit Form</button>
+        
+        <script>
+            let timeLeft = 5;
+            const timer = document.getElementById('timer');
+            const interval = setInterval(() => {
+                timeLeft--;
+                timer.innerText = timeLeft;
+                if (timeLeft <= 0) {
+                    clearInterval(interval);
+                    // Change the ID to simulate a breaking change
+                    const btn = document.getElementById('submit-btn');
+                    if(btn) {
+                        btn.id = 'submit-v3-btn'; // NEW ID
+                        btn.innerText = 'Submit Form (V3)';
+                        btn.style.backgroundColor = '#28a745';
+                        console.log('ID changed to submit-v3-btn');
+                    }
+                }
+            }, 1000);
+        </script>
+    </div>
+</body>
+</html>
