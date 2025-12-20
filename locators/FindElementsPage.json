@@ -1,0 +1,6 @@
+{
+  "action_buttons": {
+    "type": "class_name",
+    "value": "save-btn"
+  }
+}

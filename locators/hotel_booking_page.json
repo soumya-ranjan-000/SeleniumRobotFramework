@@ -1,0 +1,22 @@
+{
+  "checkin": {
+    "type": "id",
+    "value": "checkin"
+  },
+  "checkout": {
+    "type": "id",
+    "value": "checkout"
+  },
+  "guests": {
+    "type": "id",
+    "value": "guests"
+  },
+  "search-button": {
+    "type": "name",
+    "value": "searchHotelBtn"
+  },
+  "results": {
+    "type": "id",
+    "value": "results"
+  }
+}

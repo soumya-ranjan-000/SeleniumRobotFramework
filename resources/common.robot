@@ -197,6 +197,13 @@ Smart Get Element Count
     ${count}=    Get Element Count    ${element}
     RETURN    ${count}
 
+Smart Get WebElements
+    [Arguments]    ${page_name}    ${element_name}
+    [Documentation]    Gets multiple WebElements with self-healing capability.
+    
+    ${elements}=    Get WebElements With Healing    ${page_name}    ${element_name}
+    RETURN    ${elements}
+
 Smart Submit Form
     [Arguments]    ${page_name}    ${element_name}
     [Documentation]    Submits a form with self-healing capability.

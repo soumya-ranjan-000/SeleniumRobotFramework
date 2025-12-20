@@ -5,9 +5,11 @@ Suite Setup       Setup Driver
 Suite Teardown    Close All Browsers
 
 *** Variables ***
-${MOCK_APP_PATH}    ${CURDIR}/mock_app.html
+# ${MOCK_APP_PATH}    ${CURDIR}/mock_app.html
 # Use file:// protocol for local file
-${URL}              file:///${MOCK_APP_PATH}
+# ${URL}              file:///${MOCK_APP_PATH}
+${URL}              https://html-pages-for-testing.onrender.com/
+
 
 *** Test Cases ***
 Test Self Healing On Button Click

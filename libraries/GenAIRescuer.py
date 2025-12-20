@@ -12,14 +12,19 @@ from dotenv import load_dotenv
 # Try absolute import first (if libraries is in path), then relative
 try:
     from libraries.LocatorUpdater import update_json_locator
+    from libraries.LocatorMapper import LocatorMapper
 except ImportError:
     try:
         from LocatorUpdater import update_json_locator
+        from LocatorMapper import LocatorMapper
     except ImportError:
         # Fallback if neither works (should not happen if path set correctly)
          def update_json_locator(*args):
              logger.error("Could not import LocatorUpdater. Agentic update failed.")
              return False
+         class LocatorMapper:
+             def __init__(self):
+                 logger.error("Could not import LocatorMapper. Using fallback.")
 
 # Load env vars from .env file if present
 load_dotenv()
@@ -56,6 +61,9 @@ class GenAIRescuer:
         else:
             genai.configure(api_key=self.api_key)
             self.model = genai.GenerativeModel('gemini-2.0-flash')
+        
+        # Initialize centralized locator mapper
+        self.mapper = LocatorMapper()
 
     @keyword
     def load_locator(self, page_name, element_name):
@@ -81,6 +89,23 @@ class GenAIRescuer:
         and validates against the live page.
         Returns the WebElement if found, otherwise raises ElementNotFoundException.
         """
+        elements = self.get_webelements_with_healing(page_name, element_name)
+        if elements:
+            return elements[0]
+        
+        # This part should technically be handled by get_webelements_with_healing raising an exception,
+        # but for safety and clarity:
+        raise Exception(f"GenAIRescuer: No element found for '{page_name}.{element_name}' after healing.")
+
+    @keyword
+    def get_webelements_with_healing(self, page_name, element_name):
+        """
+        Attempts to find multiple WebElements using the provided Page and Element name.
+        Looks up the locator from JSON.
+        If no elements found, engages GenAI to find a new locator, prioritizes them, 
+        and validates against the live page.
+        Returns a list of WebElements if found, otherwise raises an exception.
+        """
         sl = BuiltIn().get_library_instance('SeleniumLibrary')
         driver = sl.driver
         
@@ -89,80 +114,31 @@ class GenAIRescuer:
         if not loc_data:
              raise Exception(f"Locator '{element_name}' not found in '{page_name}.json'")
         
-        # Construct RF locator
         l_type = loc_data.get('type', 'xpath')
         l_value = loc_data.get('value')
         
-        if l_type == 'id': rf_locator = f"id:{l_value}"
-        elif l_type == 'name': rf_locator = f"name:{l_value}"
-        elif l_type == 'css': rf_locator = f"css:{l_value}"
-        elif l_type == 'xpath': rf_locator = f"xpath:{l_value}"
-        elif l_type == 'link_text': rf_locator = f"link:{l_value}"
-        elif l_type == 'partial_link_text': rf_locator = f"partial link:{l_value}"
-        elif l_type == 'class_name': rf_locator = f"class:{l_value}"
-        elif l_type == 'tag_name': rf_locator = f"tag:{l_value}"
-        else: rf_locator = l_value # Default to original value if type is not strictly recognized by RF prefix
-
-        # ... simple construction
+        # Use centralized mapper to construct RF locator
+        rf_locator = self.mapper.json_to_robot_framework(l_type, l_value)
         
         # 1. Try Original Locator
         try:
-            locator_map = {
-                'id': "id",
-                'name': "name",
-                'css': "css selector",
-                'xpath': "xpath",
-                'link_text': "link text",
-                'partial_link_text': "partial link text",
-                'class_name': "class name",
-                'tag_name': "tag name",
-            }
-            selenium_by = locator_map.get(l_type)
-
-            if selenium_by:
-                init_found_el = driver.find_element(selenium_by, l_value)
-            elif l_type == 'relative':
-                # For 'relative' locators, it's generally better to use SeleniumLibrary's
-                # own 'Find Element' keyword as it handles this strategy.
-                # However, if direct driver interaction is required, this type
-                # is not directly supported by driver.find_element().
-                # This implementation assumes 'relative' might be a custom type
-                # that needs specific handling or is an error in direct driver usage.
-                # For now, we'll raise an error as it's not a standard WebDriver 'by' type.
-                raise ValueError(f"Unsupported locator type for direct WebDriver: {l_type}. Consider using SeleniumLibrary's 'Find Element' keyword for 'relative' locators.")
-            else:
-                raise ValueError(f"Unsupported locator type: {l_type}")
-
-            return init_found_el
-        except Exception:
-            logger.info(f"GenAIRescuer: Element Not Found Using Existing Locator '{rf_locator}' ({page_name}.{element_name} (Format: PageName.ElementName)). Engaging AI Healing...")
+            init_found_els = self.mapper.find_elements_by_locator(driver, l_type, l_value)
+            if init_found_els:
+                return init_found_els
+            logger.info(f"GenAIRescuer: No elements found using existing locator '{rf_locator}' ({page_name}.{element_name}). Engaging AI Healing...")
+        except Exception as e:
+            logger.info(f"GenAIRescuer: Error using existing locator '{rf_locator}': {e}. Engaging AI Healing...")
 
         # 2. Capture & Query
         html_content = self._get_minified_dom(driver.page_source)
         logger.info(f"GenAIRescuer: Captured HTML Content Successfully")
-        # We pass the OLD value to the LLM so it knows what we are looking for
         candidates = self._query_llm(rf_locator, html_content)
         logger.info(f"GenAIRescuer: LLM returned Locators Successfully. Locators: {json.dumps(candidates, indent=2)}")
         if not candidates:
             raise Exception(f"GenAIRescuer: Failed to heal/generate new locator for '{rf_locator}'. No suggestions from LLM.")
 
         # 3. Sort Candidates/Locators
-        # Priority: ID > Name > Link Text > Class Name > CSS > XPath
-        priority_map = {
-            'id': 10,
-            'name': 20, 
-            'link_text': 30,
-            'partial_link_text': 35,
-            'class_name': 40,
-            'tag_name': 50,
-            'css_selector': 60,
-            'xpath': 70,
-            'relative': 80
-        }
-        
-        # Ensure candidates is a list of dicts
         if isinstance(candidates, str): 
-            # Fallback if LLM returns a single string instead of JSON
              try:
                  candidates = json.loads(candidates)
              except:
@@ -170,11 +146,7 @@ class GenAIRescuer:
         if not isinstance(candidates, list):
              candidates = [candidates]
 
-        def get_prio(c):
-             t = c.get('type', 'xpath').lower()
-             return priority_map.get(t, 100)
-
-        candidates.sort(key=get_prio) # Lower number = Higher priority
+        candidates = self.mapper.sort_locator_candidates(candidates)
         
         logger.info(f"GenAIRescuer: Testing {len(candidates)} candidates in priority order...")
 
@@ -183,56 +155,32 @@ class GenAIRescuer:
             new_loc_type = cand.get('type', 'xpath')
             new_loc_val = cand.get('value')
             
-            # Construct Robot Framework locator string
-            if new_loc_type == 'id': rf_locator = f"id:{new_loc_val}"
-            elif new_loc_type == 'name': rf_locator = f"name:{new_loc_val}"
-            elif new_loc_type == 'css_selector': rf_locator = f"css:{new_loc_val}"
-            elif new_loc_type == 'xpath' and not new_loc_val.startswith('//') and not new_loc_val.startswith('xpath:'): 
-                rf_locator = f"xpath:{new_loc_val}"
-            elif new_loc_type == 'link_text': rf_locator = f"link:{new_loc_val}"
-            elif new_loc_type == 'partial_link_text': rf_locator = f"partial link:{new_loc_val}"
-            elif new_loc_type == 'class_name': rf_locator = f"class:{new_loc_val}"
-            elif new_loc_type == 'tag_name': rf_locator = f"tag:{new_loc_val}"
-            else: rf_locator = new_loc_val
+            normalized_type = self.mapper.normalize_genai_type(new_loc_type)
+            rf_locator = self.mapper.json_to_robot_framework(normalized_type, new_loc_val)
             
-            logger.info(f"GenAIRescuer: Finding element with Locator: {rf_locator}")
+            logger.info(f"GenAIRescuer: Finding elements with Locator: {rf_locator}")
             
             try:
-                # Use SeleniumLibrary to find element (it handles delays/waiting better than raw driver if configured)
-                # But here we want immediate check usually, so let's use raw driver for speed
-                # or sl.find_element which is robust.
-                # Let's use raw driver to catch exception immediately.
-                if new_loc_type == 'id': found_el = driver.find_element("id", new_loc_val)
-                elif new_loc_type == 'name': found_el = driver.find_element("name", new_loc_val)
-                elif new_loc_type == 'link_text': found_el = driver.find_element("link text", new_loc_val)
-                elif new_loc_type == 'partial_link_text': found_el = driver.find_element("partial link text", new_loc_val)
-                elif new_loc_type == 'class_name': found_el = driver.find_element("class name", new_loc_val)
-                elif new_loc_type == 'tag_name': found_el = driver.find_element("tag name", new_loc_val)
-                elif new_loc_type == 'css_selector': found_el = driver.find_element("css selector", new_loc_val)
-                elif new_loc_type == 'xpath': found_el = driver.find_element("xpath", new_loc_val)
-                else: 
-                     # Fallback to Robot's find_element for other types mixed in string
-                     found_el = sl.find_element(rf_locator)
+                found_els = self.mapper.find_elements_by_locator(driver, normalized_type, new_loc_val)
+                if not found_els:
+                    continue
 
-                # Log success with full metadata
-                self._log_healing(page_name, element_name, l_type, l_value, new_loc_type, new_loc_val)
+                # Log success
+                self._log_healing(page_name, element_name, l_type, l_value, normalized_type, new_loc_val)
                 
-                # AGENTIC UPDATE: Check if we should update the Page Object Model JSON file
+                # AGENTIC UPDATE
                 auto_update = BuiltIn().get_variable_value('${AUTO_UPDATE_LOCATORS}')
-                
                 if auto_update == 'True' or auto_update is True:
                     logger.info(f"GenAIRescuer: Agentic Update - Modifying {page_name}.json file...")   
-                    if update_json_locator(page_name, element_name, new_loc_type, new_loc_val):
+                    if update_json_locator(page_name, element_name, normalized_type, new_loc_val):
                         logger.info(f"GenAIRescuer: Successfully updated Page Object '{page_name}.{element_name}' with new locator.")
                     else:
                         logger.error(f"GenAIRescuer: Failed to perform Agentic Update for '{page_name}.{element_name}'.")
-                else:
-                    logger.info(f"GenAIRescuer: Auto-update disabled. Skiping JSON update for '{page_name}.{element_name}'.")
 
-                return found_el
+                return found_els
 
             except Exception as e:
-                logger.debug(f"GenAIRescuer: Element Not Found For The Locator: {rf_locator}. Error: {e}")
+                logger.debug(f"GenAIRescuer: Error finding elements for locator {rf_locator}: {e}")
                 continue
 
         # 5. Fail if all fail
