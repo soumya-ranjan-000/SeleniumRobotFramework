@@ -5,9 +5,12 @@ import logging
 from datetime import datetime
 from robot.libraries.BuiltIn import BuiltIn
 from robot.api.deco import keyword
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 import google.generativeai as genai
 from dotenv import load_dotenv
+from PIL import Image, ImageDraw
+import io
+import base64
 
 # Try absolute import first (if libraries is in path), then relative
 try:
@@ -60,7 +63,7 @@ class GenAIRescuer:
             logger.warning("GEMINI_API_KEY not found. Level 3 healing will fail.")
         else:
             genai.configure(api_key=self.api_key)
-            self.model = genai.GenerativeModel('gemini-2.0-flash')
+            self.model = genai.GenerativeModel('gemini-2.5-flash')
         
         # Initialize centralized locator mapper
         self.mapper = LocatorMapper()
@@ -136,6 +139,10 @@ class GenAIRescuer:
             if init_found_els:
                 # Scroll the first found element into view
                 self.mapper.scroll_into_view(driver, init_found_els[0])
+                
+                # --- NEW: Save snapshot for Differential Healing ---
+                self._save_dom_snapshot(page_name, element_name, init_found_els[0])
+                
                 return init_found_els
             logger.info(f"GenAIRescuer: No visible elements found using existing locator '{rf_locator}' ({page_name}.{element_name}). Engaging AI Healing...")
         except Exception as e:
@@ -143,8 +150,38 @@ class GenAIRescuer:
 
         # 2. Capture & Query
         html_content = self._get_minified_dom(driver.page_source)
+        
+        # --- NEW: Load snapshot for Differential Healing ---
+        last_known_html, last_known_meta = self._load_dom_snapshot(page_name, element_name)
+        
+        # --- NEW: Vision / Screenshot Logic ---
+        last_known_image = None
+        current_image = None
+        
+        enable_vision = BuiltIn().get_variable_value('${ENABLE_VISION_HEALING}', 'False')
+        if str(enable_vision).lower() == 'true':
+            try:
+                # 1. Capture Current Broken State
+                png_data = driver.get_screenshot_as_png()
+                current_image = Image.open(io.BytesIO(png_data))
+                
+                # 2. Load Last Known Good State (if available)
+                snapshot_dir = os.path.join("locators", "dom_snapshots", page_name)
+                success_img_path = os.path.join(snapshot_dir, f"{element_name}_success.png")
+                
+                if os.path.exists(success_img_path):
+                    try:
+                        last_known_image = Image.open(success_img_path)
+                        logger.info(f"GenAIRescuer: Loaded reference screenshot from {success_img_path}")
+                    except Exception as img_err:
+                         logger.warning(f"GenAIRescuer: Failed to load reference screenshot: {img_err}")
+                
+                logger.info("GenAIRescuer: Prepared images for Multi-Modal analysis.")
+            except Exception as e:
+                logger.warning(f"GenAIRescuer: Vision capture failed: {e}")
+
         logger.info(f"GenAIRescuer: Captured HTML Content Successfully")
-        candidates = self._query_llm(rf_locator, html_content)
+        candidates = self._query_llm(rf_locator, html_content, last_known_html, last_known_image, current_image)
         logger.info(f"GenAIRescuer: LLM returned Locators Successfully. Locators: {json.dumps(candidates, indent=2)}")
         if not candidates:
             raise Exception(f"GenAIRescuer: Failed to heal/generate new locator for '{rf_locator}'. No suggestions from LLM.")
@@ -185,6 +222,9 @@ class GenAIRescuer:
 
                 # Log success
                 self._log_healing(page_name, element_name, l_type, l_value, normalized_type, new_loc_val)
+
+                # --- NEW: Save snapshot for Differential Healing ---
+                self._save_dom_snapshot(page_name, element_name, found_els[0])
                 
                 # AGENTIC UPDATE
                 auto_update = BuiltIn().get_variable_value('${AUTO_UPDATE_LOCATORS}')
@@ -221,19 +261,38 @@ class GenAIRescuer:
             return str(body)
         return str(soup)
 
-    def _query_llm(self, old_locator, dom_snippet):
+    def _query_llm(self, old_locator, dom_snippet, last_known_good=None, last_known_image=None, current_image=None):
         """
-        Sends the prompt to the LLM.
+        Sends the prompt to the LLM (Text + Optional Images).
         """
         if not self.api_key:
             return None
 
+        snapshot_context = ""
+        if last_known_good:
+            snapshot_context = f"\nIn the previous version, the element looked like this:\n```html\n{last_known_good}\n```\nAnalyze the 'Last Known Good' HTML to understand the element's role, behavior, and visual appearance.\n"
+
+        image_context = ""
+        if last_known_image and current_image:
+            image_context = (
+                "\nI have provided two images:\n"
+                "1. **Reference Image**: Shows the valid element from a previous successful run. The target element is **highlighted with a RED or BLACK outline**.\n"
+                "2. **Current Image**: Shows the current page state where the locator failed (no highlight).\n"
+                "Compare these images to understand how the page visual structure has changed.\n"
+            )
+        elif current_image:
+             image_context = "\nI have provided a screenshot of the current page state where the locator failed.\n"
+
+
         prompt = (
             f"You are an expert Selenium automation engineer. A previous locator failed: '{old_locator}'.\n"
-            f"The current HTML structure is:\n"
+            f"{snapshot_context}"
+            f"{image_context}"
+            f"The current HTML structure (Current Broken DOM) is:\n"
             f"```html\n{dom_snippet[:15000]}\n```\n\n"
-            f"Based on the failed locator and the current HTML, identify the target element. "
-            f"Then, generate a list of alternative Selenium locators for that element. "
+            f"Based on the failed locator and the current HTML (and images if provided), identify the equivalent target element. "
+            f"If a previous version of the element was provided, use it to identify how the element's attributes or structure have evolved.\n\n"
+            f"Generate a list of alternative Selenium locators for that element. "
             f"Prioritize locators by their typical execution speed in Selenium, from fastest to slowest. "
             f"Include the following locator types if applicable, providing a robust value for each:\n"
             f"- 'id' (By.ID)\n"
@@ -253,7 +312,13 @@ class GenAIRescuer:
 
         import re
         try:
-            response = self.model.generate_content(prompt)
+            inputs = [prompt]
+            if last_known_image:
+                 inputs.append(last_known_image)
+            if current_image:
+                 inputs.append(current_image)
+                
+            response = self.model.generate_content(inputs)
             response_text = response.text.strip()
 
             # Attempt to extract JSON array content
@@ -314,4 +379,117 @@ class GenAIRescuer:
         
         with open(log_file, 'w') as f:
             json.dump(data, f, indent=2)
+
+    def _save_dom_snapshot(self, page_name, element_name, element):
+        """
+        Saves a minified DOM snippet including 3 levels of ancestry context 
+        to locators/snapshots/{page_name}/{element_name}.html
+        """
+        try:
+            # JavaScript to create a 'Vertical Slice' of the DOM (Target + 3 Parents)
+            # This isolates the structural path without including thousands of sibling nodes.
+            js_script = """
+                var el = arguments[0];
+                var depth = 3;
+                var current = el.cloneNode(true); // Deep clone the target to keep its inner text/structure
+                
+                var ptr = el.parentElement;
+                for (var i = 0; i < depth && ptr; i++) {
+                    var wrapper = ptr.cloneNode(false); // Shallow clone parent (attributes only, no siblings)
+                    wrapper.appendChild(current);
+                    current = wrapper;
+                    ptr = ptr.parentElement;
+                }
+                return current.outerHTML;
+            """
+            
+            # reliable way to get driver from the element itself
+            driver = element.parent 
+            context_html = driver.execute_script(js_script, element)
+            
+            minified_html = self._minify_html_snippet(context_html)
+            
+            snapshot_dir = os.path.join("locators", "dom_snapshots", page_name)
+            os.makedirs(snapshot_dir, exist_ok=True)
+            
+            file_path = os.path.join(snapshot_dir, f"{element_name}.html")
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(minified_html)
+            
+            # Save Metadata (Coordinates)
+            meta = {
+                'x': element.location['x'],
+                'y': element.location['y'],
+                'width': element.size['width'],
+                'height': element.size['height']
+            }
+            meta_path = os.path.join(snapshot_dir, f"{element_name}_meta.json")
+            meta_path = os.path.join(snapshot_dir, f"{element_name}_meta.json")
+            with open(meta_path, "w") as f:
+                json.dump(meta, f)
+
+            # --- Visual Snapshot with Highlight ---
+            try:
+                # 1. Highlight Element
+                original_border = driver.execute_script("return arguments[0].style.border", element)
+                driver.execute_script("arguments[0].style.border='5px solid red'", element)
+                
+                # 2. Capture Screenshot
+                screenshot_path = os.path.join(snapshot_dir, f"{element_name}_success.png")
+                driver.save_screenshot(screenshot_path)
+                
+                # 3. Remove Highlight
+                driver.execute_script(f"arguments[0].style.border='{original_border}'", element)
+                
+                logger.debug(f"GenAIRescuer: Saved highlighted success screenshot to {screenshot_path}")
+            except Exception as viz_err:
+                 logger.warning(f"GenAIRescuer: Failed to save visual snapshot: {viz_err}")
+
+            logger.debug(f"GenAIRescuer: Saved DOM snapshot (w/ 3 parents) and metadata for {page_name}.{element_name}")
+        except Exception as e:
+            logger.warning(f"GenAIRescuer: Failed to save DOM snapshot for {page_name}.{element_name}: {e}")
+
+    def _load_dom_snapshot(self, page_name, element_name):
+        """
+        Loads the minified DOM snapshot and metadata for an element if it exists.
+        Returns tuple: (html_content, metadata_dict)
+        """
+        dir_path = os.path.join("locators", "dom_snapshots", page_name)
+        html_path = os.path.join(dir_path, f"{element_name}.html")
+        meta_path = os.path.join(dir_path, f"{element_name}_meta.json")
+        
+        html_content = None
+        metadata = None
+
+        if os.path.exists(html_path):
+            try:
+                with open(html_path, "r", encoding="utf-8") as f:
+                    html_content = f.read()
+            except Exception as e:
+                logger.warning(f"GenAIRescuer: Failed to load DOM snapshot for {page_name}.{element_name}: {e}")
+        
+        if os.path.exists(meta_path):
+             try:
+                with open(meta_path, "r") as f:
+                    metadata = json.load(f)
+             except Exception as e:
+                logger.warning(f"GenAIRescuer: Failed to load metadata for {page_name}.{element_name}: {e}")
+
+        return html_content, metadata
+
+    def _minify_html_snippet(self, html):
+        """
+        Minifies a small HTML snippet by removing comments and extra whitespace.
+        """
+        if not html:
+            return ""
+        soup = BeautifulSoup(html, 'html.parser')
+        # Remove comments
+        for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
+            comment.extract()
+        # Get string and minify
+        minified = str(soup).replace('\n', ' ').replace('\r', ' ')
+        import re
+        minified = re.sub(r'\s+', ' ', minified).strip()
+        return minified
 
