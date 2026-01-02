@@ -32,7 +32,7 @@ pipeline {
                     // Run inside the virtual environment
                     sh '''
                         . venv/bin/activate
-                        robot -d results tests/
+                        robot -d results -v HEADLESS:True tests/
                     '''
                 }
             }
