@@ -23,12 +23,23 @@ pipeline {
                 '''
                 
                 // Install GitHub CLI (gh) local to the workspace
+                // Install GitHub CLI (gh) local to the workspace
                 sh '''
-                    if ! command -v gh &> /dev/null; then
+                    # Use POSIX compliant redirection (> /dev/null 2>&1) for sh compatibility
+                    if ! command -v gh > /dev/null 2>&1; then
                         echo "Installing GitHub CLI..."
                         mkdir -p bin
-                        # Download specific version for Linux AMD64
-                        curl -fsSL https://github.com/cli/cli/releases/download/v2.40.0/gh_2.40.0_linux_amd64.tar.gz -o ghcli.tar.gz
+                        
+                        # Download using curl or fallback to wget
+                        if command -v curl > /dev/null 2>&1; then
+                             curl -fsSL https://github.com/cli/cli/releases/download/v2.40.0/gh_2.40.0_linux_amd64.tar.gz -o ghcli.tar.gz
+                        elif command -v wget > /dev/null 2>&1; then
+                             wget -O ghcli.tar.gz https://github.com/cli/cli/releases/download/v2.40.0/gh_2.40.0_linux_amd64.tar.gz
+                        else
+                             echo "Error: Neither curl nor wget found. Cannot install GitHub CLI."
+                             exit 1
+                        fi
+
                         # Extract just the binary to ./bin
                         tar -xzf ghcli.tar.gz -C bin --strip-components=2 gh_2.40.0_linux_amd64/bin/gh
                         chmod +x bin/gh
