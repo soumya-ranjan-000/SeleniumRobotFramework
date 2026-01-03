@@ -113,7 +113,7 @@ pipeline {
                             git commit -m "fix(healing): Auto-fix locators [Build ${env.BUILD_NUMBER}]"
                             
                             # Push with credentials
-                            git push https://${GH_USER}:${GH_TOKEN}@github.com/soumya-ranjan-000/SeleniumRobotFramework.git ${branchName}
+                            git push https://${GH_USER}:${GH_TOKEN}@github.com/soumya-ranjan-000/SelfHealingAgenticSeleniumRobotFramework.git ${branchName}
                             
                             # Create PR using gh cli
                             if command -v gh &> /dev/null; then
@@ -142,7 +142,7 @@ pipeline {
                   unstableThreshold: 70.0
             
             // Archive the artifacts so they are downloadable
-            archiveArtifacts artifacts: 'results/*.html, results/*.xml, results/*.png', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'results/*.html, results/*.xml, results/*.png, healing_log.json', allowEmptyArchive: true
         }
     }
 }
